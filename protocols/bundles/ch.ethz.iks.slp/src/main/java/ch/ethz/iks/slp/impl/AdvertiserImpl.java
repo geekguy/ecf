@@ -9,15 +9,19 @@
  * Contributors:
  *    Jan S. Rellermeyer - initial API and implementation
  *    Markus Alexander Kuppe - enhancements and bug fixes
+ *    Md.Jamal MohiUddin (Ubiquitous Computing, C-DAC Hyderabad) - IPv6 support
+ *    P Sowjanya (Ubiquitous Computing, C-DAC Hyderabad) - IPv6 support
  *
 *****************************************************************************/
 package ch.ethz.iks.slp.impl;
 
+import java.io.IOException;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.Dictionary;
 import java.util.List;
 import java.util.Locale;
+
 import ch.ethz.iks.slp.Advertiser;
 import ch.ethz.iks.slp.ServiceLocationException;
 import ch.ethz.iks.slp.ServiceURL;
@@ -113,8 +117,15 @@ public final class AdvertiserImpl implements Advertiser {
 				locale);
 		try {
 			reg.address = InetAddress.getLocalHost();
+			if (SLPCore.isIPv6Support()) {
+				SLPCore.listen(url.getServiceType());
+			}
 		} catch (UnknownHostException e) {
 			reg.address = SLPCore.getMyIP();
+		} catch (IOException e) {
+			throw new ServiceLocationException(
+					ServiceLocationException.INVALID_REGISTRATION,
+					"Registration failed");
 		}
 		reg.port = SLPCore.SLP_PORT;
 		ServiceAcknowledgement ack = (ServiceAcknowledgement) SLPCore
@@ -158,9 +169,16 @@ public final class AdvertiserImpl implements Advertiser {
 				null, locale);
 		try {
 			dereg.address = InetAddress.getLocalHost();
+			if (SLPCore.isIPv6Support()) {
+				SLPCore.removeService(url.getServiceType());
+			}
 		} catch (UnknownHostException e) {
 			dereg.address = SLPCore.getMyIP();
-		}
+		} catch (IOException e){
+			throw new ServiceLocationException(
+					ServiceLocationException.INVALID_REGISTRATION,
+					"DeRegistration failed");
+		}		
 		dereg.port = SLPCore.SLP_PORT;
 		ServiceAcknowledgement ack = (ServiceAcknowledgement) SLPCore
 				.sendMessage(dereg, true);

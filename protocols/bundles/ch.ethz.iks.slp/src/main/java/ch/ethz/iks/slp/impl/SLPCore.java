@@ -9,6 +9,8 @@
  * Contributors:
  *    Jan S. Rellermeyer - initial API and implementation
  *    Markus Alexander Kuppe - enhancements and bug fixes
+ *    Md.Jamal MohiUddin (Ubiquitous Computing, C-DAC Hyderabad) - IPv6 support
+ *    P Sowjanya (Ubiquitous Computing, C-DAC Hyderabad) - IPv6 support
  *
 *****************************************************************************/
 
@@ -24,8 +26,9 @@ import java.lang.reflect.Constructor;
 import java.net.BindException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
-import java.net.Inet6Address;
 import java.net.InetAddress;
+import java.net.Inet4Address;
+import java.net.Inet6Address;
 import java.net.MulticastSocket;
 import java.net.ProtocolException;
 import java.net.Socket;
@@ -34,10 +37,12 @@ import java.net.UnknownHostException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 import ch.ethz.iks.slp.ServiceLocationException;
 import ch.ethz.iks.slp.ServiceType;
@@ -77,10 +82,48 @@ public abstract class SLPCore {
 	 */
 	static final String SLP_MCAST_ADDRESS = "239.255.255.253";
 
+	
 	/**
 	 * 
 	 */
 	static final InetAddress MCAST_ADDRESS;
+
+	
+	/**
+	 * SVRLOC multicast group id is for receiving
+	 * Attribute Request and Service Type Request
+	 * Messages	
+	 */
+	static final String SLP_SVRLOC = "FF02::123";
+
+	/**
+	 * 
+	 */
+	static final InetAddress SVRLOC = null;
+
+	/**
+	 * SVRLOC-DA group is used for receiving DA Advertisements
+	 */
+	static final String SLP_SVRLOC_DA = "FF02::116";
+
+	/**
+	 * 
+	 */
+	static final InetAddress DA_ADDRESS;
+
+	static final InetAddress SVRLOC_ADDRESS;
+
+	/**
+	 * Service Request Multicast Group Id
+	 */
+	static final String SLP_ServiceRqst = "";
+
+	/**
+	 * 
+	 */
+	static InetAddress serviceRqst = null;
+
+	static boolean ipv6 = false;
 
 	/**
 	 * the SLP configuration.
@@ -148,6 +191,11 @@ public abstract class SLPCore {
 	private static short nextXid;
 
 	/**
+	 * Array List of strings which stores all the services
+	 */
+	private static Set services = new HashSet();
+
+	/**
 	 * used to asynchronously receive replies. query XID -> reply queue (List)
 	 */
 	private static Map replyListeners = new HashMap();
@@ -165,7 +213,7 @@ public abstract class SLPCore {
 	 * String DA URL -> String String.
 	 */
 	static Map dASPIs = new HashMap(); // DA URL -> List of SPIs
-
+	
 	static InetAddress LOCALHOST;
 
 	/**
@@ -231,10 +279,8 @@ public abstract class SLPCore {
 				addresses = InetAddress.getAllByName(InetAddress.getLocalHost()
 						.getHostName());
 				for (int i = 0; i < addresses.length; i++) {
-					// https://bugs.eclipse.org/328074
-					if(addresses[i] instanceof Inet6Address) {
-						System.err.println("No support for IPv6 in jSLP yet (see https://bugs.eclipse.org/328074), skipping interface...");
-						continue;
+					if(addresses[i] instanceof Inet6Address){
+						ipv6=true;
 					}
 					ips.add(addresses[i].getHostAddress());
 				}
@@ -257,14 +303,20 @@ public abstract class SLPCore {
 		// initialize the XID with a random number
 		nextXid = (short) Math.round(Math.random() * Short.MAX_VALUE);
 
+		InetAddress SVRLOC=null;
+		InetAddress SVRLOC_DA=null;
 		InetAddress mcast = null;
 		try {
-			mcast = InetAddress.getByName(SLPCore.SLP_MCAST_ADDRESS);
+			mcast 	  = InetAddress.getByName(CopyOfSLPCore.SLP_MCAST_ADDRESS);
+			SVRLOC    = InetAddress.getByName(CopyOfSLPCore.SLP_SVRLOC); 
+ 			SVRLOC_DA = InetAddress.getByName(CopyOfSLPCore.SLP_SVRLOC_DA);
 		} catch (UnknownHostException e1) {
 			e1.printStackTrace();
 		}
 
 		MCAST_ADDRESS = mcast;
+		DA_ADDRESS=SVRLOC_DA;
+		SVRLOC_ADDRESS=SVRLOC;
 	}
 
 	protected static void init() {
@@ -338,12 +390,19 @@ public abstract class SLPCore {
 			mtcSocket.setTimeToLive(CONFIG.getMcastTTL());
 			if (CONFIG.getInterfaces() != null) {
 				try {
-					mtcSocket.setInterface(InetAddress.getByName(myIPs[0]));
+					for (int i=0;i<myIPs.length;i++) {
+						mtcSocket.setInterface(InetAddress.getByName(myIPs[i]));
+					}
 				} catch (Throwable t) {
 					platform.logDebug("Setting multicast socket interface to " + myIPs[0] + " failed.",t);
 				}
 			}
-			mtcSocket.joinGroup(MCAST_ADDRESS);
+
+			mtcSocket.joinGroup(MCAST_ADDRESS);	
+			if (ipv6) {
+				mtcSocket.joinGroup(SVRLOC_ADDRESS);
+				mtcSocket.joinGroup(DA_ADDRESS);
+			}
 		} catch (BindException be) {
 			platform.logError(be.getMessage(), be);
 			throw new RuntimeException("You have to be root to open port "
@@ -392,11 +451,28 @@ public abstract class SLPCore {
 		// else. If not, try to start a new daemon instance.
 		if (daemonConstr != null) {
 			try {
-				daemon = (SLPDaemon) daemonConstr.newInstance(null);
+				daemon = (SLPDaemon) daemonConstr.newInstance((Object[]) null);
 			} catch (Exception e) {
 				platform.logWarning("jSLP has not created a SLPDaemon", e);
 				daemon = null;
 			}
+		}
+	}
+	
+	static synchronized void listen(ServiceType serviceType) throws IOException {
+		if (!services.contains(serviceType)) {
+			serviceRqst = InetAddress.getByName(SLPUtils.hash(serviceType));
+			mtcSocket.joinGroup(serviceRqst);
+			services.add(serviceType);
+		}
+	}
+
+	static synchronized void removeService(ServiceType serviceType)
+			throws IOException {
+		if (!services.contains(serviceType)) {
+			serviceRqst = InetAddress.getByName(SLPUtils.hash(serviceType));
+			mtcSocket.leaveGroup(serviceRqst);
+			services.remove(serviceType);
 		}
 	}
 
@@ -412,6 +488,10 @@ public abstract class SLPCore {
 			platform.logError("Unknown net.slp.interfaces address: " + myIPs[0], e);
 			return null;
 		}
+	}
+
+	static boolean isIPv6Support() {
+		return ipv6;
 	}
 
 	/**
@@ -614,11 +694,21 @@ public abstract class SLPCore {
 						SLP_DA_TYPE), scopes, null, SLPCore.DEFAULT_LOCALE);
 				sreq.xid = SLPCore.nextXid();
 				sreq.scopeList = scopes;
-				sreq.address = MCAST_ADDRESS;
+				if (addr instanceof Inet6Address) {
+					sreq.address = DA_ADDRESS;
+				} else {
+					sreq.address = MCAST_ADDRESS;
+				}
 				sreq.multicast = true;
 				byte[] bytes = sreq.getBytes();
-				DatagramPacket d = new DatagramPacket(bytes, bytes.length,
-						MCAST_ADDRESS, SLP_PORT);
+				DatagramPacket d;
+				if (addr instanceof Inet6Address) {
+					d = new DatagramPacket(bytes, bytes.length, DA_ADDRESS,
+							SLP_PORT);
+				} else {
+					d = new DatagramPacket(bytes, bytes.length, MCAST_ADDRESS,
+							SLP_PORT);
+				}
 				platform.logTraceMessage("SENT " + sreq + "(udp multicast)");
 				setupReceiverThread(socket, CONFIG.getWaitTime(), sreq);
 				try {
@@ -762,7 +852,7 @@ public abstract class SLPCore {
 		try {
 
 			long start = System.currentTimeMillis();
-
+			InetAddress destination;
 			List replyQueue = new ArrayList();
 			List responders = new ArrayList();
 			List responses = new ArrayList();
@@ -791,8 +881,7 @@ public abstract class SLPCore {
 					throw e;
 				}
 			}
-
-			msg.address = MCAST_ADDRESS;
+			
 			ReplyMessage reply;
 
 			for (int i = 0; i < myIPs.length; i++) {
@@ -801,7 +890,28 @@ public abstract class SLPCore {
 				final MulticastSocket socket = new MulticastSocket();
 				socket.setInterface(addr);
 				socket.setTimeToLive(CONFIG.getMcastTTL());
+				
+				if (addr instanceof Inet4Address) {
+					msg.address = MCAST_ADDRESS;
+				} else {
+					byte type = SLPMessage.getMessageType(msg);
+					switch (type) {
+					case SLPMessage.SRVRQST:
+						ServiceRequest srq = (ServiceRequest) msg;
+						msg.address = InetAddress.getByName(SLPUtils
+								.hash(srq.serviceType));
+						break;
 
+					case SLPMessage.ATTRRQST:
+					case SLPMessage.SRVTYPERQST:
+						msg.address = SVRLOC_ADDRESS;
+						break;
+
+					default:
+						return null;
+					}
+				}
+				destination=msg.address;
 				setupReceiverThread(socket, CONFIG.getMcastMaxWait(), msg);
 
 				// the multicast convergence algorithm
@@ -833,8 +943,7 @@ public abstract class SLPCore {
 
 					// send the message
 					DatagramPacket p = new DatagramPacket(message,
-							message.length, InetAddress
-									.getByName(SLP_MCAST_ADDRESS), SLP_PORT);
+							message.length, destination, SLP_PORT);
 
 					try {
 						socket.send(p);
